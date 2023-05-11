@@ -26,7 +26,7 @@ from mmpose.models import PoseLifter, TopDown
 # from demo import pose_lift_model
 
 
-def pose_lift(pose_lift_model, pose_2d_results, img_size):
+def pose_lift(pose_lift_model, pose_2d_results, img_size=None):
     # 一些设置
     rebase_keypoint_height = True
 
@@ -77,33 +77,53 @@ def pose_lift(pose_lift_model, pose_2d_results, img_size):
 
     print('Running 2D-to-3D pose lifting inference...')
     returned_pose_lift = []
-    for i, pose_det_results in enumerate(
-            mmcv.track_iter_progress(pose_2d_results)):  # mmcv.track_iter_progress是为了画进度条而封装了一层
 
-        # extract and pad input pose2d sequence
-        pose_results_2d = extract_pose_sequence(
-            pose_2d_results,
-            frame_idx=i,  # 只对最后一帧做预测
-            causal=data_cfg.causal,
-            seq_len=data_cfg.seq_len,
-            step=data_cfg.seq_frame_interval)
+    save_cut = []
+    save_result = []
 
-        # #smooth 2d results
-        # # if smoother:
-        # pose_results_2d = Smoother.smooth(pose_results_2d)
+    # for i, pose_det_results in enumerate(
+    #         pose_2d_results):  # mmcv.track_iter_progress是为了画进度条而封装了一层
+    # print(f"causal = {data_cfg.causal}")
+    # extract and pad input pose2d sequence
+    pose_results_2d = extract_pose_sequence(
+        pose_2d_results,
+        frame_idx=len(pose_2d_results)-1,  # 只对最后一帧做预测
+        causal=data_cfg.causal,
+        seq_len=data_cfg.seq_len,
+        step=data_cfg.seq_frame_interval)
 
-        # 2D-to-3D pose lifting
-        pose_lift_results = inference_pose_lifter_model(
-            pose_lift_model,
-            pose_results_2d=pose_results_2d,
-            dataset=pose_lift_dataset,
-            dataset_info=pose_lift_dataset_info,
-            with_track_id=True,
-            image_size=img_size)
+    # save_cut.append([i[0]['keypoints'] for i in pose_results_2d])  # (10, 27, 17, 3)
 
-        for pose_lift in pose_lift_results:
-            returned_pose_lift.append(copy.deepcopy(pose_lift["keypoints_3d"]))
+    # 2D-to-3D pose lifting
+    pose_lift_results = inference_pose_lifter_model(
+        pose_lift_model,
+        pose_results_2d=pose_results_2d,
+        dataset=pose_lift_dataset,
+        dataset_info=pose_lift_dataset_info,
+        with_track_id=True,
+        image_size=img_size)
 
+    show_plt = False
+    if show_plt:
+        test_out = pose_lift_results[0]["keypoints_3d"]
+        x = test_out[:, 0]
+        y = test_out[:, 1]
+        z = test_out[:, 2]
+        plt.scatter(x, y)
+        # plt.scatter(y, z)
+        list1 = [10, 9, 8, 7, 0]
+        plt.plot(x[list1], y[list1])
+        list2 = [16, 15, 14, 8, 11, 12, 13]
+        plt.plot(x[list2], y[list2])
+        list3 = [3, 2, 1, 0, 4, 5, 6]
+        plt.plot(x[list3], y[list3])
+        plt.show()
+    # save_result.append(pose_lift_results[0]["keypoints_3d"])  # (10, 17, 4)
+
+    returned_pose_lift.append(copy.deepcopy(pose_lift_results[0]["keypoints_3d"]))
+
+    # np.save("outputs/cut.npy", np.array(save_cut))
+    # np.save("outputs/cut_result.npy", np.array(save_result))
     return returned_pose_lift
 
     #     # Pose processing

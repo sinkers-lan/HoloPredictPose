@@ -13,8 +13,6 @@ from argparse import ArgumentParser
 
 import torch
 
-from TrajectoryCNN.TrajectoryCNN_test import Model, TraCNN_predict
-
 import cv2
 import mmcv
 import numpy as np
@@ -26,7 +24,6 @@ from mmpose.apis import (extract_pose_sequence,
                          process_mmdet_results, vis_3d_pose_result)
 
 from mmdet.apis import inference_detector, init_detector
-from videopose3D.videoPose3D_test import pose_lift
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
@@ -41,14 +38,16 @@ import threading
 # from datetime import datetime, timedelta, time
 from collections import namedtuple, deque
 from enum import Enum
-import numpy as np
 import cv2
-import multiprocessing
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Manager, freeze_support
+import queue
 import multiprocessing as mp
+from convert_keypoint_definition import *
+import TrajectoryCNN.TrajectoryCNN_test as tcnn
+from videopose3D.videoPose3D_test_3 import pose_lift
 
 
-def my_socket():
+def my_socket(q_frame: Queue):
     # Definitions
     # Protocol Header Format
     # see https://docs.python.org/2/library/struct.html#format-characters
@@ -78,7 +77,7 @@ def my_socket():
     VIDEO_STREAM_PORT = 23940
     AHAT_STREAM_PORT = 23941
 
-    HOST = '10.21.182.65'
+    HOST = '10.28.178.135'
 
     HundredsOfNsToMilliseconds = 1e-4
     MillisecondsToSeconds = 1e-3
@@ -102,11 +101,12 @@ def my_socket():
             self.latest_header = None
             self.socket = None
             """开始连接"""
-            self.start_socket()
+            # self.start_socket()
             """开始循环接收"""
-            self.start_listen()
+            # self.start_listen()
 
         def get_data_from_socket(self):
+            print("revcall")
             # read the header in chunks
             reply = self.recvall(self.header_size)
 
@@ -139,19 +139,18 @@ def my_socket():
             print('INFO: Socket connected to ' + self.host + ' on port ' + str(self.port))
 
         def start_listen(self):
-            t = threading.Thread(target=self.listen)
+            t = threading.Thread(target=self.listen, daemon=True)
             t.start()
 
         """
-        自定义异步接收函数
+        自定义接收函数
         """
 
         def listen_once(self):
             self.latest_header, image_data = self.get_data_from_socket()
-            self.latest_frame = np.frombuffer(image_data, dtype=np.uint8).reshape((self.latest_header.ImageHeight,
-                                                                                   self.latest_header.ImageWidth,
-                                                                                   self.latest_header.PixelStride))
-            return self.latest_frame
+            return np.frombuffer(image_data, dtype=np.uint8).reshape((self.latest_header.ImageHeight,
+                                                                      self.latest_header.ImageWidth,
+                                                                      self.latest_header.PixelStride))
 
         """
         自定义获取最新帧
@@ -180,6 +179,7 @@ def my_socket():
             print("new thread for listen")
             while True:
                 self.latest_header, image_data = self.get_data_from_socket()
+                print("get ")
                 self.latest_frame = np.frombuffer(image_data, dtype=np.uint8).reshape((self.latest_header.ImageHeight,
                                                                                        self.latest_header.ImageWidth,
                                                                                        self.latest_header.PixelStride))
@@ -189,220 +189,49 @@ def my_socket():
             return pv_to_world_transform
 
     video_receiver = VideoReceiverThread(HOST)
+    video_receiver.start_socket()
+    while True:
+        if q_frame.full():
+            try:
+                q_frame.get(block=False)
+            except queue.Empty:
+                pass
+        q_frame.put(video_receiver.listen_once())
+        print("socket process put a frame.")
     pass
+
+# def my_socket(q_frame: Queue):
+#     # 测试程序
+#     video_path = 'test.mp4'
+#     cap = cv2.VideoCapture(video_path)  # import video files
+#
+#     # 帧率(frames per second)
+#     fps = cap.get(cv2.CAP_PROP_FPS)
+#
+#     # determine whether to open normally
+#     if cap.isOpened():
+#         ret, frame = cap.read()
+#     else:
+#         ret = False
+#
+#     try:
+#         while ret:
+#             if q_frame.full():
+#                 try:
+#                     q_frame.get(block=False)
+#                 except queue.Empty:
+#                     pass
+#             print("socket process put a frame.")
+#             q_frame.put(frame, block=True, timeout=30)
+#             time.sleep(1 / fps)  # 按原帧率播放
+#             ret, frame = cap.read()
+#     finally:
+#         cap.release()
+#     pass
 
 
 np.warnings.filterwarnings('ignore')
 
-app = FastAPI()
-
-
-# coco->h36m转换函数
-def convert_keypoint_definition(keypoints, pose_det_dataset,
-                                pose_lift_dataset):
-    """Convert pose det dataset keypoints definition to pose lifter dataset
-    keypoints definition, so that they are compatible with the definitions
-    required for 3D pose lifting.
-
-    Args:
-        keypoints (ndarray[K, 2 or 3]): 2D keypoints to be transformed.
-        pose_det_dataset, (str): Name of the dataset for 2D pose detector.
-        pose_lift_dataset (str): Name of the dataset for pose lifter model.
-
-    Returns:
-        ndarray[K, 2 or 3]: the transformed 2D keypoints.
-    """
-    assert pose_lift_dataset in [
-        'Body3DH36MDataset', 'Body3DMpiInf3dhpDataset'
-    ], '`pose_lift_dataset` should be `Body3DH36MDataset` ' \
-       f'or `Body3DMpiInf3dhpDataset`, but got {pose_lift_dataset}.'
-
-    coco_style_datasets = [
-        'TopDownCocoDataset', 'TopDownPoseTrack18Dataset',
-        'TopDownPoseTrack18VideoDataset'
-    ]
-    keypoints_new = np.zeros((17, keypoints.shape[1]), dtype=keypoints.dtype)
-    if pose_lift_dataset == 'Body3DH36MDataset':
-        if pose_det_dataset in ['TopDownH36MDataset']:
-            keypoints_new = keypoints
-        elif pose_det_dataset in coco_style_datasets:
-            # pelvis (root) is in the middle of l_hip and r_hip
-            keypoints_new[0] = (keypoints[11] + keypoints[12]) / 2
-            # thorax is in the middle of l_shoulder and r_shoulder
-            keypoints_new[8] = (keypoints[5] + keypoints[6]) / 2
-            # spine is in the middle of thorax and pelvis
-            keypoints_new[7] = (keypoints_new[0] + keypoints_new[8]) / 2
-            # in COCO, head is in the middle of l_eye and r_eye
-            # in PoseTrack18, head is in the middle of head_bottom and head_top
-            keypoints_new[10] = (keypoints[1] + keypoints[2]) / 2
-            # rearrange other keypoints
-            keypoints_new[[1, 2, 3, 4, 5, 6, 9, 11, 12, 13, 14, 15, 16]] = \
-                keypoints[[12, 14, 16, 11, 13, 15, 0, 5, 7, 9, 6, 8, 10]]
-        elif pose_det_dataset in ['TopDownAicDataset']:
-            # pelvis (root) is in the middle of l_hip and r_hip
-            keypoints_new[0] = (keypoints[9] + keypoints[6]) / 2
-            # thorax is in the middle of l_shoulder and r_shoulder
-            keypoints_new[8] = (keypoints[3] + keypoints[0]) / 2
-            # spine is in the middle of thorax and pelvis
-            keypoints_new[7] = (keypoints_new[0] + keypoints_new[8]) / 2
-            # neck base (top end of neck) is 1/4 the way from
-            # neck (bottom end of neck) to head top
-            keypoints_new[9] = (3 * keypoints[13] + keypoints[12]) / 4
-            # head (spherical centre of head) is 7/12 the way from
-            # neck (bottom end of neck) to head top
-            keypoints_new[10] = (5 * keypoints[13] + 7 * keypoints[12]) / 12
-
-            keypoints_new[[1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16]] = \
-                keypoints[[6, 7, 8, 9, 10, 11, 3, 4, 5, 0, 1, 2]]
-        elif pose_det_dataset in ['TopDownCrowdPoseDataset']:
-            # pelvis (root) is in the middle of l_hip and r_hip
-            keypoints_new[0] = (keypoints[6] + keypoints[7]) / 2
-            # thorax is in the middle of l_shoulder and r_shoulder
-            keypoints_new[8] = (keypoints[0] + keypoints[1]) / 2
-            # spine is in the middle of thorax and pelvis
-            keypoints_new[7] = (keypoints_new[0] + keypoints_new[8]) / 2
-            # neck base (top end of neck) is 1/4 the way from
-            # neck (bottom end of neck) to head top
-            keypoints_new[9] = (3 * keypoints[13] + keypoints[12]) / 4
-            # head (spherical centre of head) is 7/12 the way from
-            # neck (bottom end of neck) to head top
-            keypoints_new[10] = (5 * keypoints[13] + 7 * keypoints[12]) / 12
-
-            keypoints_new[[1, 2, 3, 4, 5, 6, 11, 12, 13, 14, 15, 16]] = \
-                keypoints[[7, 9, 11, 6, 8, 10, 0, 2, 4, 1, 3, 5]]
-        else:
-            raise NotImplementedError(
-                f'unsupported conversion between {pose_lift_dataset} and '
-                f'{pose_det_dataset}')
-
-    elif pose_lift_dataset == 'Body3DMpiInf3dhpDataset':
-        if pose_det_dataset in coco_style_datasets:
-            # pelvis (root) is in the middle of l_hip and r_hip
-            keypoints_new[14] = (keypoints[11] + keypoints[12]) / 2
-            # neck (bottom end of neck) is in the middle of
-            # l_shoulder and r_shoulder
-            keypoints_new[1] = (keypoints[5] + keypoints[6]) / 2
-            # spine (centre of torso) is in the middle of neck and root
-            keypoints_new[15] = (keypoints_new[1] + keypoints_new[14]) / 2
-
-            # in COCO, head is in the middle of l_eye and r_eye
-            # in PoseTrack18, head is in the middle of head_bottom and head_top
-            keypoints_new[16] = (keypoints[1] + keypoints[2]) / 2
-
-            if 'PoseTrack18' in pose_det_dataset:
-                keypoints_new[0] = keypoints[1]
-                # don't extrapolate the head top confidence score
-                keypoints_new[16, 2] = keypoints_new[0, 2]
-            else:
-                # head top is extrapolated from neck and head
-                keypoints_new[0] = (4 * keypoints_new[16] -
-                                    keypoints_new[1]) / 3
-                # don't extrapolate the head top confidence score
-                keypoints_new[0, 2] = keypoints_new[16, 2]
-            # arms and legs
-            keypoints_new[2:14] = keypoints[[
-                6, 8, 10, 5, 7, 9, 12, 14, 16, 11, 13, 15
-            ]]
-        elif pose_det_dataset in ['TopDownAicDataset']:
-            # head top is head top
-            keypoints_new[0] = keypoints[12]
-            # neck (bottom end of neck) is neck
-            keypoints_new[1] = keypoints[13]
-            # pelvis (root) is in the middle of l_hip and r_hip
-            keypoints_new[14] = (keypoints[9] + keypoints[6]) / 2
-            # spine (centre of torso) is in the middle of neck and root
-            keypoints_new[15] = (keypoints_new[1] + keypoints_new[14]) / 2
-            # head (spherical centre of head) is 7/12 the way from
-            # neck (bottom end of neck) to head top
-            keypoints_new[16] = (5 * keypoints[13] + 7 * keypoints[12]) / 12
-            # arms and legs
-            keypoints_new[2:14] = keypoints[0:12]
-        elif pose_det_dataset in ['TopDownCrowdPoseDataset']:
-            # head top is top_head
-            keypoints_new[0] = keypoints[12]
-            # neck (bottom end of neck) is in the middle of
-            # l_shoulder and r_shoulder
-            keypoints_new[1] = (keypoints[0] + keypoints[1]) / 2
-            # pelvis (root) is in the middle of l_hip and r_hip
-            keypoints_new[14] = (keypoints[7] + keypoints[6]) / 2
-            # spine (centre of torso) is in the middle of neck and root
-            keypoints_new[15] = (keypoints_new[1] + keypoints_new[14]) / 2
-            # head (spherical centre of head) is 7/12 the way from
-            # neck (bottom end of neck) to head top
-            keypoints_new[16] = (5 * keypoints[13] + 7 * keypoints[12]) / 12
-            # arms and legs
-            keypoints_new[2:14] = keypoints[[
-                1, 3, 5, 0, 2, 4, 7, 9, 11, 6, 8, 10
-            ]]
-
-        else:
-            raise NotImplementedError(
-                f'unsupported conversion between {pose_lift_dataset} and '
-                f'{pose_det_dataset}')
-
-    return keypoints_new
-
-
-# 定义可视化图像函数，输入图像 array，可视化图像
-def show_img_from_array(img):
-    '''输入 array，matplotlib 可视化格式为 RGB，因此需将 BGR 转 RGB，最后可视化出来'''
-    img_RGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    plt.imshow(img_RGB)
-    plt.show()
-
-
-def start_multi_process():
-    video_pose_3d_result = []
-    trajectory_cnn_result = []
-
-    q_frame = Queue(1)
-    q_yolo_lite = Queue(1)
-    q_lite_3d = Queue(1)
-    q_3d_tcnn = Queue(1)
-
-    q_2d_result = Queue(1)
-    q_3d_result = Queue(1)
-    q_tcnn_result = Queue(1)
-
-    p = Process(target=my_yolo, args=(q_frame, q_yolo_lite), daemon=True, name="yolo")
-    p.start()
-    p = Process(target=my_lite_hr_net, args=(q_yolo_lite, q_lite_3d, q_2d_result), daemon=True, name="lite")
-    p.start()
-    p = Process(target=my_video_pose_3d, args=(q_lite_3d, q_3d_tcnn, q_3d_result), daemon=True, name="3d")
-    p.start()
-    p = Process(target=my_trajectory_cnn, args=(q_3d_tcnn, q_tcnn_result), daemon=True, name="tcnn")
-    p.start()
-
-    # 测试程序
-    video_path = 'test.mp4'
-    cap = cv2.VideoCapture(video_path)  # import video files
-    # determine whether to open normally
-    if cap.isOpened():
-        ret, frame = cap.read()
-    else:
-        ret = False
-    try:
-        time0 = time.time()
-        while ret:
-            ret, frame = cap.read()
-            q_frame.put(frame, block=True, timeout=30)
-            print("main process put a frame.")
-            print(f"--------------------------all time:{time.time() - time0}----------------------------------")
-            time0 = time.time()
-            # if q_2d_result.get() is not None:
-            #     video_pose_3d_result.append(q_3d_result.get())
-            #     trajectory_cnn_result.append(q_tcnn_result.get())
-            #     print(f"--------------------------all time:{time.time() - time0}----------------------------------")
-            #     time0 = time.time()
-            # else:
-            #     print("---------------------------------------------------------------------------------------------")
-            #     time0 = time.time()
-    finally:
-        cap.release()
-    pose_3D_result = np.array(video_pose_3d_result)
-    predict_list = np.array(trajectory_cnn_result)
-    np.save("outputs/videopose3D1.npy", pose_3D_result)
-    np.save("outputs/TrajectoryCNN1.npy", predict_list)
 
 
 def my_yolo(q_frame: Queue, q: Queue):
@@ -411,7 +240,6 @@ def my_yolo(q_frame: Queue, q: Queue):
     det_checkpoint = 'yolox/yolox_tiny_8x8_300e_coco_20211124_171234-b4047906.pth'
     det_model = init_detector(det_config, det_checkpoint)
 
-    # -----------------------------进行检测
     # 检测框检测
     while True:
         frame = q_frame.get()
@@ -422,9 +250,13 @@ def my_yolo(q_frame: Queue, q: Queue):
         person_results = process_mmdet_results(mmdet_results, cat_id=1)
         end1 = time.time() - start_time
         print(f'det_test time: {end1}')
-
+        if q.full():
+            try:
+                q.get(block=False)
+            except queue.Empty:
+                pass
         q.put((frame, person_results))
-        # print("yolo process put an result.")
+        print("yolo process put a frame.")
 
 
 def my_lite_hr_net(q_pre: Queue, q_next: Queue, q_result: Queue):
@@ -452,6 +284,23 @@ def my_lite_hr_net(q_pre: Queue, q_next: Queue, q_result: Queue):
         pose_results, returned_outputs = inference_top_down_pose_model(pose_model, frame, person_results,
                                                                        bbox_thr=0.3,
                                                                        format='xyxy', dataset='TopDownCocoDataset')
+
+        # 判断检测到的人个数是否为1
+        if len(pose_results) == 0:
+            print("lite-hrnet只支持针对单人的任务,但目前未完整检测到人的关键点")
+            continue
+        elif len(pose_results) > 1:  # 选择bbox最大的那个
+            max = 0.0
+            maxidx = 0
+            for idx, pose in enumerate(pose_results):
+                area = (pose['bbox'][2] - pose['bbox'][0]) * (pose['bbox'][3] - pose['bbox'][1])
+                if area >= max:
+                    maxidx = idx
+                    max = area
+            pose_results_new = []
+            pose_results_new.append(copy.deepcopy(pose_results[maxidx]))
+            pose_results = pose_results_new
+
         # 过滤的工作是否可以换到yolo进程中完成
         end1 = time.time() - start_time
         print(f'lite-hrnet_test time: {end1}')
@@ -463,38 +312,24 @@ def my_lite_hr_net(q_pre: Queue, q_next: Queue, q_result: Queue):
             next_id)
 
         img_2d_num += 1  # 结果数目加一
-        if img_2d_num <= 10:
+        if img_2d_num <= 27:
             pose_2d_results.append(copy.deepcopy(pose_results))  # 添加到结果列表中，用于后续预测
         else:
             pose_2d_results.pop(0)
             pose_2d_results.append(copy.deepcopy(pose_results))
 
-        if img_2d_num >= 10:  # 已经积攒够了所需的帧数
-            if img_2d_num == 10:
-                # convert keypoint definition
-                for pose_det_results in pose_2d_results:
-                    for res in pose_det_results:
-                        keypoints = res['keypoints']
-                        res['keypoints'] = convert_keypoint_definition(
-                            keypoints, pose_det_dataset, pose_lift_dataset)
-            else:  # img_2d_num > 10
-                # convert keypoint definition
-                for res in pose_2d_results[-1]:
-                    keypoints = res['keypoints']
-                    res['keypoints'] = convert_keypoint_definition(
-                        keypoints, pose_det_dataset, pose_lift_dataset)
-            q_next.put((frame, pose_2d_results))
-            # q_result.put(pose_2d_results)
-        else:
-            # q_result.put(None)
-            pass
+        for res in pose_2d_results[-1]:
+            keypoints = res['keypoints']
+            res['keypoints'] = convert_keypoint_definition(
+                keypoints, pose_det_dataset, pose_lift_dataset)
+        q_next.put((frame, copy.deepcopy(pose_2d_results)))
 
 
 def my_video_pose_3d(q_pre: Queue, q_next: Queue, q_result: Queue):
     # videopose3D模型定义
     pose_lifter_config = "videopose3D/videopose3d_h36m_27frames_fullconv_semi-supervised_cpn_ft.py"
     pose_lifter_checkpoint = "videopose3D/videopose_h36m_27frames_fullconv_semi-supervised_cpn_ft-71be9cde_20210527.pth"
-    pose_lift_model = init_pose_model(pose_lifter_config, pose_lifter_checkpoint)
+    pose_lift_model = init_pose_model(pose_lifter_config, pose_lifter_checkpoint, device='cuda:1')
 
     pose_2d_results = []  # 处理后产生的2D关键点结果列表，用于后续检测(lite -> videopose3d)
     img_2d_num = 0  # 用于记录已经输出的2D关键点的个数(vediopose的局部变量)
@@ -503,62 +338,125 @@ def my_video_pose_3d(q_pre: Queue, q_next: Queue, q_result: Queue):
     # ----------------------------------第二阶段:人体3D关键点估计与动作预测-------------------------------------
     while True:
         frame, pose_2d_results = q_pre.get()
+        # for pose_det_results in pose_2d_results:
+        #     for res in pose_det_results:
+        #         q_2d.put(res['keypoints'])
+
         # videoPose3D预测
         start_time = time.time()
         img_size = (frame.shape[1], frame.shape[0])
-        pose_3D = pose_lift(pose_lift_model, pose_2d_results, img_size)
+        pose_3D = pose_lift(pose_lift_model, pose_2d_results, img_size)  # 只出一帧
         end1 = time.time() - start_time
         print(f'videopose3D_test time: {end1}')
-        # pose_3D_result.append(pose_3D[0].copy())
-        # q_result.put(pose_3D[0].copy())
+        pose_3D_result.append(pose_3D[0])
 
         # 调整videoPose3D的输出使其满足TrajectoryCNN的输入
         pose_3D_ndarry = np.ndarray((len(pose_3D), 17, 3))
         for i, pose in enumerate(pose_3D):
             pose = pose[:, :3]
             pose_3D_ndarry[i] = copy.deepcopy(pose)
-        pose_3D_ndarry *= 1000
-        q_next.put(pose_3D_ndarry)
+        pose_3D_ndarry *= -1000
+        q_next.put(pose_3D_ndarry[0])
+        # q_result.put(copy.deepcopy(pose_3D_ndarry[0]))  # 目标9
 
 
-def my_trajectory_cnn(q: Queue, q_result: Queue):
+def my_trajectory_cnn(q: Queue, q_3d_result: Queue, q_result: Queue, q_all: Queue):
     # TrajectoryCNN模型定义
     pose3D_predict_model = tcnn.Model()
 
     # 最终结果
     predict_list = []  # 存储最后的预测结果序列(tcnn最终结果)
+    tem_list = []
 
+    i = 0
+    time0 = time.time()
     while True:
         pose_3D_ndarry = q.get()
-        # TraCNN动作预测
-        predict_3D = tcnn.TraCNN_predict(pose3D_predict_model, pose_3D_ndarry)
-        # predict_list.append(predict_3D.copy())  # 积攒结果
-        # q_result.put(predict_3D.copy())
+        tem_list.append(pose_3D_ndarry)
+        if len(tem_list) >= 10:
+            print(
+                f"--------------------------------------frame:{i} time:{time.time() - time0}------------------------------")
+            time0 = time.time()
+            i += 1
+            # TraCNN动作预测
+            predict_3D = tcnn.TraCNN_predict(pose3D_predict_model, np.array(tem_list))
+            # predict_list.append(predict_3D.copy())  # 积攒结果
+            # q_3d_result.put(pose_3D_ndarry)
+            # q_result.put(predict_3D)
+            tem_list.pop(0)
+            d = {"org": copy.deepcopy(pose_3D_ndarry.reshape(17, 3).tolist()),
+                 "pred": copy.deepcopy(predict_3D.reshape(17, 3).tolist()), "avail": 1}
+            if q_all.full():
+                try:
+                    q_all.get(block=False)
+                except queue.Empty:
+                    pass
+            q_all.put(d)
+
+            # d["org"] = copy.deepcopy(pose_3D_ndarry.reshape(17, 3).tolist())
+            # d["pred"] = copy.deepcopy(predict_3D.reshape(17, 3).tolist())
+            # d['avail'] = 1
+from multiprocessing.managers import BaseManager
 
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
+    q = Queue(1)
+
+    q_frame = Queue(1)
+    q_yolo_lite = Queue(1)
+    q_lite_3d = Queue(1)
+    q_3d_tcnn = Queue(1)
+
+    q_2d_result = Queue()
+    q_3d_result = Queue()
+    q_tcnn_result = Queue()
+
+    p0 = Process(target=my_socket, args=(q_frame,), daemon=True, name="socket")
+    p0.start()
+    p1 = Process(target=my_yolo, args=(q_frame, q_yolo_lite), daemon=True, name="yolo")
+    p1.start()
+    p2 = Process(target=my_lite_hr_net, args=(q_yolo_lite, q_lite_3d, q_2d_result), daemon=True, name="lite")
+    p2.start()
+    p3 = Process(target=my_video_pose_3d, args=(q_lite_3d, q_3d_tcnn, q_3d_result), daemon=True,
+                 name="3d")
+    p3.start()
+    p4 = Process(target=my_trajectory_cnn, args=(q_3d_tcnn, q_3d_result, q_tcnn_result, q), daemon=True,
+                 name="tcnn")
+    p4.start()
+
+    class QueueManager(BaseManager):
+        pass
+
+
+    QueueManager.register('get_queue', callable=lambda: q)
+    m = QueueManager(address=('', 50001), authkey=b'abracadabra')
+    server = m.get_server()
+    # time.sleep(20)
+    print("start~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    server.serve_forever()
+
+
+if __name__ == "try(3)":
+    print("get!")
+    class QueueManager(BaseManager):
+        pass
+    QueueManager.register('get_queue')
+    m = QueueManager(address=('127.0.0.1', 50001), authkey=b'abracadabra')
+    m.connect()
+    queue_app = m.get_queue()
+    # print(queue.get())
+
+
+app = FastAPI()
 
 
 @app.get("/cv")
 async def get_cv():
-    frame = video_receiver.latest_frame
-    if frame is None:
-        print("No frame get")
-        return {"org": None, "pred": None, "avail": 0}
-    return models(frame)
-
-
-@app.get("/start")
-async def get_start():
-    # manager.start()
+    # m = BaseManager(address=('127.0.0.1', 50000), authkey=b'abc')
+    # m.connect()
+    if queue_app.empty():
+        return
+    else:
+        return queue_app.get()
     pass
-
-
-@app.get("/end")
-async def get_end():
-    # manager.end()
-    pass
-
-    # 日志级别log_level="trace"
