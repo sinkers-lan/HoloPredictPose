@@ -1,5 +1,7 @@
 # HoloPredictPose
 
+前端环境部署教程
+
 
 
 ## 前言
@@ -106,6 +108,8 @@
 ![image-20230427154422842](https://sinkers-pic.oss-cn-beijing.aliyuncs.com/img/image-20230427154422842.png)
 
 ④为dll库更改平台设置如下：
+
+该dll的作用是流式获取Hololens2的Camera传感器的图像。该dll由[cgsaxner/HoloLens2-Unity-ResearchModeStreamer (github.com)](https://github.com/cgsaxner/HoloLens2-Unity-ResearchModeStreamer)提供，并进行了优化以适应本项目。
 
 ![image-20230428134422848](https://sinkers-pic.oss-cn-beijing.aliyuncs.com/img/image-20230428134422848.png)
 
