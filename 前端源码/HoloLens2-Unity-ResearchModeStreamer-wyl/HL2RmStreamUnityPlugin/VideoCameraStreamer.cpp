@@ -28,19 +28,48 @@ VideoCameraStreamer::VideoCameraStreamer(
     // m_streamingEnabled = true;
 }
 
+//IAsyncAction VideoCameraStreamer::StartServer()
+//{
+//    try
+//    {
+//        // The ConnectionReceived event is raised when connections are received.
+//        m_streamSocketListener.ConnectionReceived({ this, &VideoCameraStreamer::OnConnectionReceived });
+//
+//        // Start listening for incoming TCP connections on the specified port. You can specify any port that's not currently in use.
+//        // Every protocol typically has a standard port number. For example, HTTP is typically 80, FTP is 20 and 21, etc.
+//        // For this example, we'll choose an arbitrary port number.
+//        co_await m_streamSocketListener.BindServiceNameAsync(m_portName);
+//        //m_streamSocketListener.Control().KeepAlive(true);
+//
+//#if DBG_ENABLE_INFO_LOGGING       
+//        wchar_t msgBuffer[200];
+//        swprintf_s(msgBuffer, L"VideoCameraStreamer::StartServer: Server is listening at %ls \n",
+//            m_portName.c_str());
+//        OutputDebugStringW(msgBuffer);
+//#endif
+//    }
+//    catch (winrt::hresult_error const& ex)
+//    {
+//#if DBG_ENABLE_ERROR_LOGGING
+//        SocketErrorStatus webErrorStatus{ SocketError::GetStatus(ex.to_abi()) };
+//        winrt::hstring message = webErrorStatus != SocketErrorStatus::Unknown ?
+//            winrt::to_hstring((int32_t)webErrorStatus) : winrt::to_hstring(ex.to_abi());
+//        OutputDebugStringW(L"VideoCameraStreamer::StartServer: Failed to open listener with ");
+//        OutputDebugStringW(message.c_str());
+//        OutputDebugStringW(L"\n");
+//#endif
+//    }
+//}
+
 IAsyncAction VideoCameraStreamer::StartServer()
 {
     try
     {
         // The ConnectionReceived event is raised when connections are received.
-        m_streamSocketListener.ConnectionReceived({ this, &VideoCameraStreamer::OnConnectionReceived });
+        m_serverDatagramSocket.MessageReceived({ this, &VideoCameraStreamer::ServerDatagramSocket_MessageReceived });
 
         // Start listening for incoming TCP connections on the specified port. You can specify any port that's not currently in use.
-        // Every protocol typically has a standard port number. For example, HTTP is typically 80, FTP is 20 and 21, etc.
-        // For this example, we'll choose an arbitrary port number.
-        co_await m_streamSocketListener.BindServiceNameAsync(m_portName);
-        //m_streamSocketListener.Control().KeepAlive(true);
-
+        co_await m_serverDatagramSocket.BindServiceNameAsync(m_portName);
 #if DBG_ENABLE_INFO_LOGGING       
         wchar_t msgBuffer[200];
         swprintf_s(msgBuffer, L"VideoCameraStreamer::StartServer: Server is listening at %ls \n",
@@ -61,14 +90,50 @@ IAsyncAction VideoCameraStreamer::StartServer()
     }
 }
 
-void VideoCameraStreamer::OnConnectionReceived(
-    StreamSocketListener /* sender */,
-    StreamSocketListenerConnectionReceivedEventArgs args)
+//void VideoCameraStreamer::OnConnectionReceived(
+//    StreamSocketListener /* sender */,
+//    StreamSocketListenerConnectionReceivedEventArgs args)
+//{
+//    try
+//    {
+//        m_streamSocket = args.Socket();
+//        m_writer = DataWriter(args.Socket().OutputStream());
+//        m_writer.UnicodeEncoding(UnicodeEncoding::Utf8);
+//        m_writer.ByteOrder(ByteOrder::LittleEndian);
+//
+//        m_writeInProgress = false;
+//        isConnected = true;
+//#if DBG_ENABLE_INFO_LOGGING
+//        OutputDebugStringW(L"VideoCameraStreamer::OnConnectionReceived: Received connection! \n");
+//#endif
+//    }
+//    catch (winrt::hresult_error const& ex)
+//    {
+//#if DBG_ENABLE_ERROR_LOGGING
+//        SocketErrorStatus webErrorStatus{ SocketError::GetStatus(ex.to_abi()) };
+//        winrt::hstring message = webErrorStatus != SocketErrorStatus::Unknown ?
+//            winrt::to_hstring((int32_t)webErrorStatus) : winrt::to_hstring(ex.to_abi());
+//        OutputDebugStringW(L"VideoCameraStreamer::StartServer: Failed to establish connection with ");
+//        OutputDebugStringW(message.c_str());
+//        OutputDebugStringW(L"\n");
+//#endif
+//    }
+//}
+
+void VideoCameraStreamer::ServerDatagramSocket_MessageReceived(
+    winrt::Windows::Networking::Sockets::DatagramSocket sender,
+    winrt::Windows::Networking::Sockets::DatagramSocketMessageReceivedEventArgs args)
 {
-    try
-    {
-        m_streamSocket = args.Socket();
-        m_writer = DataWriter(args.Socket().OutputStream());
+    try {
+        IBuffer buffer = args.GetDataReader().ReadBuffer(args.GetDataReader().UnconsumedBufferLength());
+        std::string message{ reinterpret_cast<const char*>(buffer.data()), buffer.Length() };
+
+        // 发送原内容回去
+        m_serverDatagramSocket.ConnectAsync(args.RemoteAddress(), args.RemotePort());
+        m_writer = DataWriter{ m_serverDatagramSocket.OutputStream() };
+        m_writer.WriteString(winrt::to_hstring(message));
+        m_writer.StoreAsync();
+
         m_writer.UnicodeEncoding(UnicodeEncoding::Utf8);
         m_writer.ByteOrder(ByteOrder::LittleEndian);
 
@@ -179,7 +244,64 @@ void VideoCameraStreamer::Send(
         }
     }
 
+    SendTcp(pTimestamp, imageWidth, imageHeight, pixelStride, fx, fy, PVtoWorldtransform, imageBufferAsVector);
 
+}
+
+void VideoCameraStreamer::SendUdp(long long pTimestamp, int imageWidth, int imageHeight, int pixelStride, float fx, float fy, winrt::Windows::Foundation::Numerics::float4x4 PVtoWorldtransform, std::vector<uint8_t> imageBufferAsVector) {
+    if (m_writeInProgress)
+    {
+#if DBG_ENABLE_VERBOSE_LOGGING
+        OutputDebugStringW(
+            L"VideoCameraStreamer::SendFrame: Write in progress.\n");
+#endif
+        return;
+    }
+    m_writeInProgress = true;
+    try
+    {
+        // Write header
+        m_writer.WriteUInt64(pTimestamp);
+        m_writer.WriteInt32(imageWidth);
+        m_writer.WriteInt32(imageHeight);
+        m_writer.WriteInt32(pixelStride - 1);
+        m_writer.WriteInt32(imageWidth * (pixelStride - 1)); // adapted row stride
+        m_writer.WriteSingle(fx);
+        m_writer.WriteSingle(fy);
+
+        WriteMatrix4x4(PVtoWorldtransform);
+
+        m_writer.WriteBytes(imageBufferAsVector);
+        m_writer.StoreAsync();
+    }
+    catch (winrt::hresult_error const& ex)
+    {
+        SocketErrorStatus webErrorStatus{ SocketError::GetStatus(ex.to_abi()) };
+        if (webErrorStatus == SocketErrorStatus::ConnectionResetByPeer)
+        {
+            // the client disconnected!
+            m_writer == nullptr;
+            m_writeInProgress = false;
+            m_serverDatagramSocket = nullptr;
+        }
+#if DBG_ENABLE_ERROR_LOGGING
+        winrt::hstring message = ex.message();
+        OutputDebugStringW(L"VideoCameraStreamer::SendFrame: Sending failed with ");
+        OutputDebugStringW(message.c_str());
+        OutputDebugStringW(L"\n");
+#endif // DBG_ENABLE_ERROR_LOGGING
+    }
+
+    m_writeInProgress = false;
+
+#if DBG_ENABLE_VERBOSE_LOGGING
+    OutputDebugStringW(
+        L"VideoCameraStreamer::SendFrame: Frame sent!\n");
+#endif
+}
+
+void VideoCameraStreamer::SendTcp(long long pTimestamp, int imageWidth, int imageHeight, int pixelStride, float fx, float fy, winrt::Windows::Foundation::Numerics::float4x4 PVtoWorldtransform,    std::vector<uint8_t> imageBufferAsVector) {
+    
     if (m_writeInProgress)
     {
 #if DBG_ENABLE_VERBOSE_LOGGING
@@ -229,7 +351,6 @@ void VideoCameraStreamer::Send(
     OutputDebugStringW(
         L"VideoCameraStreamer::SendFrame: Frame sent!\n");
 #endif
-
 }
 
 void VideoCameraStreamer::WriteMatrix4x4(
