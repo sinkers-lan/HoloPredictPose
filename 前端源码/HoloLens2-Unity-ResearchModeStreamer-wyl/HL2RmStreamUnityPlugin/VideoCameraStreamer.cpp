@@ -65,10 +65,10 @@ IAsyncAction VideoCameraStreamer::StartServer()
 {
     try
     {
-        // The ConnectionReceived event is raised when connections are received.
+        // The MessageReceived event is raised when a Message is received.
         m_serverDatagramSocket.MessageReceived({ this, &VideoCameraStreamer::ServerDatagramSocket_MessageReceived });
 
-        // Start listening for incoming TCP connections on the specified port. You can specify any port that's not currently in use.
+        // Start listening for incoming UDP connections on the specified port. You can specify any port that's not currently in use.
         co_await m_serverDatagramSocket.BindServiceNameAsync(m_portName);
 #if DBG_ENABLE_INFO_LOGGING       
         wchar_t msgBuffer[200];
@@ -128,19 +128,24 @@ void VideoCameraStreamer::ServerDatagramSocket_MessageReceived(
         IBuffer buffer = args.GetDataReader().ReadBuffer(args.GetDataReader().UnconsumedBufferLength());
         std::string message{ reinterpret_cast<const char*>(buffer.data()), buffer.Length() };
 
-        // 发送原内容回去
+#if DBG_ENABLE_INFO_LOGGING
+        wchar_t msgBuffer[200];
+        swprintf_s(msgBuffer, L"VideoCameraStreamer::ServerDatagramSocket_MessageReceived: Reveive text: %ls \n", message);
+        OutputDebugStringW(msgBuffer);
+#endif
+
+        // send it back for test
         m_serverDatagramSocket.ConnectAsync(args.RemoteAddress(), args.RemotePort());
         m_writer = DataWriter{ m_serverDatagramSocket.OutputStream() };
-        m_writer.WriteString(winrt::to_hstring(message));
-        m_writer.StoreAsync();
-
         m_writer.UnicodeEncoding(UnicodeEncoding::Utf8);
         m_writer.ByteOrder(ByteOrder::LittleEndian);
+        m_writer.WriteString(winrt::to_hstring(message));
+        m_writer.StoreAsync();
 
         m_writeInProgress = false;
         isConnected = true;
 #if DBG_ENABLE_INFO_LOGGING
-        OutputDebugStringW(L"VideoCameraStreamer::OnConnectionReceived: Received connection! \n");
+        OutputDebugStringW(L"VideoCameraStreamer::ServerDatagramSocket_MessageReceived: Send OK! \n");
 #endif
     }
     catch (winrt::hresult_error const& ex)
@@ -156,7 +161,7 @@ void VideoCameraStreamer::ServerDatagramSocket_MessageReceived(
     }
 }
 
-//发送图像
+// send a frame
 void VideoCameraStreamer::Send(
     MediaFrameReference pFrame,
     long long pTimestamp)
