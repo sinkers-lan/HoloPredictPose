@@ -244,64 +244,6 @@ void VideoCameraStreamer::Send(
         }
     }
 
-    SendTcp(pTimestamp, imageWidth, imageHeight, pixelStride, fx, fy, PVtoWorldtransform, imageBufferAsVector);
-
-}
-
-void VideoCameraStreamer::SendUdp(long long pTimestamp, int imageWidth, int imageHeight, int pixelStride, float fx, float fy, winrt::Windows::Foundation::Numerics::float4x4 PVtoWorldtransform, std::vector<uint8_t> imageBufferAsVector) {
-    if (m_writeInProgress)
-    {
-#if DBG_ENABLE_VERBOSE_LOGGING
-        OutputDebugStringW(
-            L"VideoCameraStreamer::SendFrame: Write in progress.\n");
-#endif
-        return;
-    }
-    m_writeInProgress = true;
-    try
-    {
-        // Write header
-        m_writer.WriteUInt64(pTimestamp);
-        m_writer.WriteInt32(imageWidth);
-        m_writer.WriteInt32(imageHeight);
-        m_writer.WriteInt32(pixelStride - 1);
-        m_writer.WriteInt32(imageWidth * (pixelStride - 1)); // adapted row stride
-        m_writer.WriteSingle(fx);
-        m_writer.WriteSingle(fy);
-
-        WriteMatrix4x4(PVtoWorldtransform);
-
-        m_writer.WriteBytes(imageBufferAsVector);
-        m_writer.StoreAsync();
-    }
-    catch (winrt::hresult_error const& ex)
-    {
-        SocketErrorStatus webErrorStatus{ SocketError::GetStatus(ex.to_abi()) };
-        if (webErrorStatus == SocketErrorStatus::ConnectionResetByPeer)
-        {
-            // the client disconnected!
-            m_writer == nullptr;
-            m_writeInProgress = false;
-            m_serverDatagramSocket = nullptr;
-        }
-#if DBG_ENABLE_ERROR_LOGGING
-        winrt::hstring message = ex.message();
-        OutputDebugStringW(L"VideoCameraStreamer::SendFrame: Sending failed with ");
-        OutputDebugStringW(message.c_str());
-        OutputDebugStringW(L"\n");
-#endif // DBG_ENABLE_ERROR_LOGGING
-    }
-
-    m_writeInProgress = false;
-
-#if DBG_ENABLE_VERBOSE_LOGGING
-    OutputDebugStringW(
-        L"VideoCameraStreamer::SendFrame: Frame sent!\n");
-#endif
-}
-
-void VideoCameraStreamer::SendTcp(long long pTimestamp, int imageWidth, int imageHeight, int pixelStride, float fx, float fy, winrt::Windows::Foundation::Numerics::float4x4 PVtoWorldtransform,    std::vector<uint8_t> imageBufferAsVector) {
-    
     if (m_writeInProgress)
     {
 #if DBG_ENABLE_VERBOSE_LOGGING
@@ -335,6 +277,7 @@ void VideoCameraStreamer::SendTcp(long long pTimestamp, int imageWidth, int imag
             // the client disconnected!
             m_writer == nullptr;
             m_streamSocket == nullptr;
+            m_serverDatagramSocket == nullptr;
             m_writeInProgress = false;
         }
 #if DBG_ENABLE_ERROR_LOGGING
@@ -351,6 +294,7 @@ void VideoCameraStreamer::SendTcp(long long pTimestamp, int imageWidth, int imag
     OutputDebugStringW(
         L"VideoCameraStreamer::SendFrame: Frame sent!\n");
 #endif
+
 }
 
 void VideoCameraStreamer::WriteMatrix4x4(
