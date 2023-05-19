@@ -1,5 +1,7 @@
 #include "pch.h"
-
+#define DBG_ENABLE_VERBOSE_LOGGING 0
+#define DBG_ENABLE_INFO_LOGGING 1
+#define DBG_ENABLE_ERROR_LOGGING 1
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Windows::Media::Capture;
 using namespace winrt::Windows::Media::Capture::Frames;
@@ -111,7 +113,7 @@ IAsyncAction VideoCameraFrameProcessor::StartAsync()
 {
     m_fExit = false;
 
-#if DBG_ENABLE_VERBOSE_LOGGING
+#if DBG_ENABLE_INFO_LOGGING
     OutputDebugStringW(L"VideoCameraFrameProcessor::StartAsync: Starting video frame acquisition...\n");
 #endif
 
@@ -125,7 +127,7 @@ IAsyncAction VideoCameraFrameProcessor::StartAsync()
 
     isRunning = true;
 
-#if DBG_ENABLE_VERBOSE_LOGGING
+#if DBG_ENABLE_INFO_LOGGING
     OutputDebugStringW(L"VideoCameraFrameProcessor::StartAsync: Done.\n");
 #endif
 }

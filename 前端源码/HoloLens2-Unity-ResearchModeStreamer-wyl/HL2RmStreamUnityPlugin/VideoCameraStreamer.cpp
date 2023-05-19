@@ -280,10 +280,10 @@ void VideoCameraStreamer::Send(
         if (webErrorStatus == SocketErrorStatus::ConnectionResetByPeer)
         {
             // the client disconnected!
-            m_writer == nullptr;
+            /*m_writer == nullptr;
             m_streamSocket == nullptr;
             m_serverDatagramSocket == nullptr;
-            m_writeInProgress = false;
+            m_writeInProgress = false;*/
         }
 #if DBG_ENABLE_ERROR_LOGGING
         winrt::hstring message = ex.message();

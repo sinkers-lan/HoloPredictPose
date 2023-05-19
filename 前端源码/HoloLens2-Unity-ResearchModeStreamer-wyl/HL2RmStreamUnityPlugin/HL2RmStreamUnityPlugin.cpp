@@ -1,7 +1,7 @@
 ﻿#include "pch.h"
 #include "HL2RmStreamUnityPlugin.h"
 
-#define DBG_ENABLE_VERBOSE_LOGGING 0
+#define DBG_ENABLE_VERBOSE_LOGGING 1
 #define DBG_ENABLE_INFO_LOGGING 1
 
 extern "C"
@@ -27,7 +27,7 @@ void __stdcall HL2Stream::Initialize()
 	m_worldOrigin = m_locator.CreateStationaryFrameOfReferenceAtCurrentLocation().CoordinateSystem();
 
 	InitializeResearchModeSensors();
-	InitializeResearchModeProcessing();
+	//InitializeResearchModeProcessing();
 	auto processOp{ InitializeVideoFrameProcessorAsync() };
 	processOp.get();
 
@@ -127,7 +127,7 @@ void HL2Stream::InitializeResearchModeSensors()
 	// manage consent
 	winrt::check_hresult(m_pSensorDevice->QueryInterface(IID_PPV_ARGS(&m_pSensorDeviceConsent)));
 	winrt::check_hresult(m_pSensorDeviceConsent->RequestCamAccessAsync(CamAccessOnComplete));
-	winrt::check_hresult(m_pSensorDeviceConsent->RequestIMUAccessAsync(ImuAccessOnComplete));
+	//winrt::check_hresult(m_pSensorDeviceConsent->RequestIMUAccessAsync(ImuAccessOnComplete));
 
 	m_pSensorDevice->DisableEyeSelection();
 
